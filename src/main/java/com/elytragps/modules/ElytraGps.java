@@ -21,7 +21,6 @@ import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.RenderUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -66,6 +65,13 @@ public class ElytraGps extends Module {
     private final Setting<Boolean> autoAdvance = sgGeneral.add(new BoolSetting.Builder()
         .name("auto-advance")
         .description("Сам лететь к следующей точке, когда достиг текущей. Если выключено — кружит над точкой, пока не нажмёшь бинд/.nextpoint.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> startNearest = sgGeneral.add(new BoolSetting.Builder()
+        .name("start-nearest")
+        .description("Начинать маршрут из файла с ближайшей к тебе точки (а не с первой).")
         .defaultValue(true)
         .build()
     );
@@ -204,6 +210,8 @@ public class ElytraGps extends Module {
     private double cruiseY = 0;
     private int fireworkTimer = 0;
     private int takeoffTimer = 0;
+    private int airTicks = 0;
+    private boolean jumpHeld = false;
 
     public ElytraGps() {
         super(ElytraGpsAddon.CATEGORY, "elytra-gps", "Летит на элитрах к координатам или по списку точек (.gps, .nextpoint).");
@@ -294,19 +302,32 @@ public class ElytraGps extends Module {
         }
 
         index = 0;
+        if (startNearest.get() && route.size() > 1) {
+            double best = Double.MAX_VALUE;
+            for (int i = 0; i < route.size(); i++) {
+                double d = horizontalDistanceTo(route.get(i));
+                if (d < best) {
+                    best = d;
+                    index = i;
+                }
+            }
+        }
         waiting = false;
         navigating = true;
         fireworkTimer = 0;
         takeoffTimer = 0;
+        airTicks = 0;
+        jumpHeld = false;
         cruiseY = cruiseAltitude.get() > 0 ? cruiseAltitude.get() : mc.player.getY() + 40;
 
         if (!isActive()) toggle();
 
-        say("Старт. Точка 1/%d: %s", route.size(), route.get(0));
+        say("Старт. Точка %d/%d: %s", index + 1, route.size(), route.get(index));
     }
 
     @Override
     public void onDeactivate() {
+        releaseJump();
         navigating = false;
         waiting = false;
     }
@@ -340,6 +361,7 @@ public class ElytraGps extends Module {
             return;
         }
         takeoffTimer = 0;
+        releaseJump();
 
         Point target = route.get(index);
 
@@ -479,20 +501,40 @@ public class ElytraGps extends Module {
 
         takeoffTimer++;
 
-        // Не получилось за ~6 секунд — сдаёмся, чтобы не прыгать вечно.
-        if (takeoffTimer > 120) {
+        // Не получилось за ~10 секунд — сдаёмся, чтобы не прыгать вечно.
+        if (takeoffTimer > 200) {
+            releaseJump();
             error("Не удалось взлететь. Останавливаюсь.");
             stopNavigation();
             return;
         }
 
-        if (mc.player.onGround()) {
-            mc.player.setJumping(false);
-            mc.player.setSprinting(true);
-            mc.player.jumpFromGround();
-        } else if (takeoffTimer % 4 == 0 && mc.getConnection() != null) {
-            mc.getConnection().send(new ServerboundPlayerCommandPacket(mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+        // Двойной пробел: нажали -> отпустили -> (в воздухе) нажали ещё раз.
+        // Если пробел держали в прошлом тике — отпускаем, чтобы следующее нажатие считалось новым.
+        if (jumpHeld) {
+            releaseJump();
+            return;
         }
+
+        if (mc.player.onGround()) {
+            airTicks = 0;
+            pressJump();                       // первый пробел — прыжок
+        } else {
+            airTicks++;
+            if (airTicks >= 3 && (airTicks - 3) % 5 == 0) {
+                pressJump();                   // второй пробел в воздухе — раскрывает элитры
+            }
+        }
+    }
+
+    private void pressJump() {
+        mc.options.keyJump.setDown(true);
+        jumpHeld = true;
+    }
+
+    private void releaseJump() {
+        if (jumpHeld && mc.options != null) mc.options.keyJump.setDown(false);
+        jumpHeld = false;
     }
 
     private void handleFireworks() {
