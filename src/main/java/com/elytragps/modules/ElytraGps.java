@@ -384,27 +384,26 @@ public class ElytraGps extends Module {
         if (useFireworks.get()) handleFireworks();
     }
 
-    private void onArrive() {
-        boolean last = index + 1 >= route.size();
+    
+private void onArrive() {
+    Point reached = route.get(index);
 
-        if (last) {
-            say("Достиг последней точки. Маршрут завершён.");
-            stopNavigation();
-            return;
-        }
-
-        if (autoAdvance.get()) {
-            index++;
-            say("Точка достигнута. Дальше %d/%d: %s", index + 1, route.size(), route.get(index));
-        } else {
-            waiting = true;
-            say("Точка %d/%d достигнута. Кружу и жду .nextpoint (или бинд).", index + 1, route.size());
-        }
+    // Сохраняем достигнутую точку, чтобы не возвращаться к ней.
+    if (!PointFile.markDeleted(fileName.get(), reached)) {
+        warning("Не удалось сохранить достигнутую точку.");
     }
 
-    // =====================================================================
-    //  Навигация
-    // =====================================================================
+    waiting = true;
+    releaseJump();
+
+    say("Точка %d/%d достигнута: %s. Ожидаю NextPoint.",
+        index + 1, route.size(), reached);
+
+    // Останавливаем управление полётом, но сохраняем маршрут
+    // и состояние ожидания для команды NextPoint.
+    navigating = false;
+    if (isActive()) toggle();
+}
 
     private double horizontalDistanceTo(Point p) {
         double dx = p.x() - mc.player.getX();
