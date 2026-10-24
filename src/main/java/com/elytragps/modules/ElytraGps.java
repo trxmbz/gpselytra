@@ -1,3 +1,4 @@
+
 package com.elytragps.modules;
 
 import com.elytragps.ElytraGpsAddon;
@@ -24,6 +25,7 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.HitResult;
@@ -32,298 +34,516 @@ import net.minecraft.world.phys.Vec3;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Автопилот на элитрах: летит к одной точке или по списку точек.
- * <p>
- * Управляется командами {@code .gps} / {@code .nextpoint}; модуль включается сам при старте маршрута
- * и выключается при остановке/завершении. Бинд "next-point" работает пока модуль включён (т.е. во время полёта).
- */
 public class ElytraGps extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgFlight = settings.createGroup("Flight");
     private final SettingGroup sgFireworks = settings.createGroup("Fireworks");
     private final SettingGroup sgRender = settings.createGroup("Render");
 
-    // ---- General ----
+    // General
 
-    private final Setting<String> fileName = sgGeneral.add(new StringSetting.Builder()
-        .name("file-name")
-        .description("Файл с точками (ищется в .minecraft/meteor-client/, затем в .minecraft/).")
-        .defaultValue("pointelytra.txt")
-        .build()
+    private final Setting<String> fileName = sgGeneral.add(
+        new StringSetting.Builder()
+            .name("file-name")
+            .description("Файл с координатами.")
+            .defaultValue("pointelytra.txt")
+            .build()
     );
 
-    @SuppressWarnings("unused")
-    private final Setting<Keybind> nextPointKey = sgGeneral.add(new KeybindSetting.Builder()
-        .name("next-point-key")
-        .description("Бинд: перейти к следующей точке (то же, что .nextpoint). Работает пока маршрут активен.")
-        .defaultValue(Keybind.none())
-        .action(this::nextPoint)
-        .build()
+    private final Setting<Keybind> nextPointKey = sgGeneral.add(
+        new KeybindSetting.Builder()
+            .name("next-point-key")
+            .description("Продолжить маршрут или пропустить текущую точку.")
+            .defaultValue(Keybind.none())
+            .action(this::nextPoint)
+            .build()
     );
 
-    private final Setting<Boolean> autoAdvance = sgGeneral.add(new BoolSetting.Builder()
-        .name("auto-advance")
-        .description("Сам лететь к следующей точке, когда достиг текущей. Если выключено — кружит над точкой, пока не нажмёшь бинд/.nextpoint.")
-        .defaultValue(true)
-        .build()
+    private final Setting<Boolean> autoAdvance = sgGeneral.add(
+        new BoolSetting.Builder()
+            .name("auto-advance")
+            .description("Автоматически продолжать маршрут после прибытия.")
+            .defaultValue(false)
+            .build()
     );
 
-    private final Setting<Boolean> startNearest = sgGeneral.add(new BoolSetting.Builder()
-        .name("start-nearest")
-        .description("Начинать маршрут из файла с ближайшей к тебе точки (а не с первой).")
-        .defaultValue(true)
-        .build()
+    private final Setting<Boolean> startNearest = sgGeneral.add(
+        new BoolSetting.Builder()
+            .name("start-nearest")
+            .description("Сначала выбирать ближайшую непосещённую точку.")
+            .defaultValue(true)
+            .build()
     );
 
-    private final Setting<Boolean> autoTakeoff = sgGeneral.add(new BoolSetting.Builder()
-        .name("auto-takeoff")
-        .description("Сам прыгать и раскрывать элитры, если ты на земле.")
-        .defaultValue(true)
-        .build()
+    private final Setting<Boolean> autoTakeoff = sgGeneral.add(
+        new BoolSetting.Builder()
+            .name("auto-takeoff")
+            .description("Автоматически прыгать и раскрывать элитры.")
+            .defaultValue(true)
+            .build()
     );
 
-    private final Setting<Boolean> chatFeedback = sgGeneral.add(new BoolSetting.Builder()
-        .name("chat-feedback")
-        .description("Сообщения в чат о ходе маршрута.")
-        .defaultValue(true)
-        .build()
+    private final Setting<Boolean> chatFeedback = sgGeneral.add(
+        new BoolSetting.Builder()
+            .name("chat-feedback")
+            .description("Показывать сообщения о маршруте.")
+            .defaultValue(true)
+            .build()
     );
 
-    // ---- Flight ----
+    // Elytra safety
 
-    private final Setting<Double> arriveRadius = sgFlight.add(new DoubleSetting.Builder()
-        .name("arrive-radius")
-        .description("На каком расстоянии (в блоках) точка считается достигнутой.")
-        .defaultValue(12)
-        .range(2, 100)
-        .sliderRange(2, 50)
-        .build()
+    private final Setting<Boolean> autoReplaceElytra = sgGeneral.add(
+        new BoolSetting.Builder()
+            .name("auto-replace-elytra")
+            .description("Менять элитры до того, как они сломаются.")
+            .defaultValue(true)
+            .build()
     );
 
-    private final Setting<Double> orbitRadius = sgFlight.add(new DoubleSetting.Builder()
-        .name("orbit-radius")
-        .description("Радиус круга ожидания, когда auto-advance выключен.")
-        .defaultValue(25)
-        .range(8, 200)
-        .sliderRange(8, 100)
-        .build()
+    private final Setting<Integer> elytraDurabilityLeft = sgGeneral.add(
+        new IntSetting.Builder()
+            .name("elytra-durability-left")
+            .description("Менять элитру, когда осталось столько прочности.")
+            .defaultValue(15)
+            .range(1, 100)
+            .sliderRange(1, 50)
+            .visible(autoReplaceElytra::get)
+            .build()
     );
 
-    private final Setting<Integer> cruiseAltitude = sgFlight.add(new IntSetting.Builder()
-        .name("cruise-altitude")
-        .description("Высота (Y) полёта между точками. 0 = авто: высота старта + 40.")
-        .defaultValue(0)
-        .range(0, 2000)
-        .sliderRange(0, 320)
-        .build()
+    private final Setting<Boolean> spawnIfNoElytra = sgGeneral.add(
+        new BoolSetting.Builder()
+            .name("spawn-if-no-elytra")
+            .description("Отправить команду спавна, если запасных элитр нет.")
+            .defaultValue(false)
+            .build()
     );
 
-    private final Setting<Double> maxPitchUp = sgFlight.add(new DoubleSetting.Builder()
-        .name("max-climb-pitch")
-        .description("Максимальный угол набора высоты (градусы).")
-        .defaultValue(45)
-        .range(5, 80)
-        .sliderRange(5, 80)
-        .build()
+    private final Setting<String> spawnCommand = sgGeneral.add(
+        new StringSetting.Builder()
+            .name("spawn-command")
+            .description("Команда сервера для возвращения на спавн, без /.")
+            .defaultValue("spawn")
+            .visible(spawnIfNoElytra::get)
+            .build()
     );
 
-    private final Setting<Double> maxPitchDown = sgFlight.add(new DoubleSetting.Builder()
-        .name("max-dive-pitch")
-        .description("Максимальный угол снижения (градусы).")
-        .defaultValue(30)
-        .range(5, 80)
-        .sliderRange(5, 80)
-        .build()
+    // Flight
+
+    private final Setting<Double> arriveRadius = sgFlight.add(
+        new DoubleSetting.Builder()
+            .name("arrive-radius")
+            .description("Расстояние, на котором точка считается достигнутой.")
+            .defaultValue(12)
+            .range(2, 100)
+            .sliderRange(2, 50)
+            .build()
     );
 
-    private final Setting<Double> turnSpeed = sgFlight.add(new DoubleSetting.Builder()
-        .name("turn-speed")
-        .description("Максимальный поворот камеры за тик (градусы). Меньше — плавнее.")
-        .defaultValue(25)
-        .range(1, 180)
-        .sliderRange(1, 90)
-        .build()
+    private final Setting<Double> orbitRadius = sgFlight.add(
+        new DoubleSetting.Builder()
+            .name("orbit-radius")
+            .description("Радиус ожидания при выключенном auto-advance.")
+            .defaultValue(25)
+            .range(8, 200)
+            .sliderRange(8, 100)
+            .visible(() -> !autoAdvance.get())
+            .build()
     );
 
-    private final Setting<Boolean> avoidObstacles = sgFlight.add(new BoolSetting.Builder()
-        .name("avoid-obstacles")
-        .description("Задирать нос вверх, если впереди блоки (горы, деревья).")
-        .defaultValue(true)
-        .build()
+    private final Setting<Integer> cruiseAltitude = sgFlight.add(
+        new IntSetting.Builder()
+            .name("cruise-altitude")
+            .description("Высота полёта. 0 = высота старта + 40.")
+            .defaultValue(0)
+            .range(0, 2000)
+            .sliderRange(0, 320)
+            .build()
     );
 
-    private final Setting<Integer> lookahead = sgFlight.add(new IntSetting.Builder()
-        .name("obstacle-lookahead")
-        .description("Дальность проверки препятствий (блоки).")
-        .defaultValue(45)
-        .range(10, 120)
-        .sliderRange(10, 120)
-        .visible(avoidObstacles::get)
-        .build()
+    private final Setting<Double> maxPitchUp = sgFlight.add(
+        new DoubleSetting.Builder()
+            .name("max-climb-pitch")
+            .defaultValue(45)
+            .range(5, 80)
+            .sliderRange(5, 80)
+            .build()
     );
 
-    // ---- Fireworks ----
-
-    private final Setting<Boolean> useFireworks = sgFireworks.add(new BoolSetting.Builder()
-        .name("use-fireworks")
-        .description("Использовать фейерверки из хотбара/оффхенда, чтобы держать скорость.")
-        .defaultValue(true)
-        .build()
+    private final Setting<Double> maxPitchDown = sgFlight.add(
+        new DoubleSetting.Builder()
+            .name("max-dive-pitch")
+            .defaultValue(30)
+            .range(5, 80)
+            .sliderRange(5, 80)
+            .build()
     );
 
-    private final Setting<Double> minSpeed = sgFireworks.add(new DoubleSetting.Builder()
-        .name("min-speed")
-        .description("Если скорость ниже (блоков/сек) — запускаем фейерверк.")
-        .defaultValue(26)
-        .range(5, 60)
-        .sliderRange(5, 60)
-        .visible(useFireworks::get)
-        .build()
+    private final Setting<Double> turnSpeed = sgFlight.add(
+        new DoubleSetting.Builder()
+            .name("turn-speed")
+            .description("Максимальный поворот за тик.")
+            .defaultValue(25)
+            .range(1, 180)
+            .sliderRange(1, 90)
+            .build()
     );
 
-    private final Setting<Integer> fireworkCooldown = sgFireworks.add(new IntSetting.Builder()
-        .name("firework-cooldown")
-        .description("Минимальная пауза между фейерверками (тики).")
-        .defaultValue(25)
-        .range(5, 200)
-        .sliderRange(5, 100)
-        .visible(useFireworks::get)
-        .build()
+    private final Setting<Boolean> avoidObstacles = sgFlight.add(
+        new BoolSetting.Builder()
+            .name("avoid-obstacles")
+            .description("Набирать высоту перед препятствиями.")
+            .defaultValue(true)
+            .build()
     );
 
-    // ---- Render ----
-
-    private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
-        .name("render")
-        .description("Рисовать линию и рамку к текущей точке, а также остальные точки маршрута.")
-        .defaultValue(true)
-        .build()
+    private final Setting<Integer> lookahead = sgFlight.add(
+        new IntSetting.Builder()
+            .name("obstacle-lookahead")
+            .defaultValue(45)
+            .range(10, 120)
+            .sliderRange(10, 120)
+            .visible(avoidObstacles::get)
+            .build()
     );
 
-    // ---- State ----
+    // Fireworks
+
+    private final Setting<Boolean> useFireworks = sgFireworks.add(
+        new BoolSetting.Builder()
+            .name("use-fireworks")
+            .description("Использовать ракеты для ускорения.")
+            .defaultValue(true)
+            .build()
+    );
+
+    private final Setting<Double> minSpeed = sgFireworks.add(
+        new DoubleSetting.Builder()
+            .name("min-speed")
+            .defaultValue(26)
+            .range(5, 60)
+            .sliderRange(5, 60)
+            .visible(useFireworks::get)
+            .build()
+    );
+
+    private final Setting<Integer> fireworkCooldown = sgFireworks.add(
+        new IntSetting.Builder()
+            .name("firework-cooldown")
+            .defaultValue(25)
+            .range(5, 200)
+            .sliderRange(5, 100)
+            .visible(useFireworks::get)
+            .build()
+    );
+
+    // Render
+
+    private final Setting<Boolean> render = sgRender.add(
+        new BoolSetting.Builder()
+            .name("render")
+            .description("Показывать текущую точку и линию маршрута.")
+            .defaultValue(true)
+            .build()
+    );
+
+    // State
 
     private final List<Point> route = new ArrayList<>();
-    private int index = 0;
-    private boolean navigating = false;
-    private boolean waiting = false;     // кружим над точкой, ждём .nextpoint
-    private double cruiseY = 0;
-    private int fireworkTimer = 0;
-    private int takeoffTimer = 0;
-    private int airTicks = 0;
-    private boolean jumpHeld = false;
+
+    private int index;
+    private boolean navigating;
+    private boolean waiting;
+    private boolean spawnCommandSent;
+
+    private double cruiseY;
+
+    private int fireworkTimer;
+    private int takeoffTimer;
+    private int airTicks;
+
+    private boolean jumpHeld;
 
     public ElytraGps() {
-        super(ElytraGpsAddon.CATEGORY, "elytra-gps", "Летит на элитрах к координатам или по списку точек (.gps, .nextpoint).");
+        super(
+            ElytraGpsAddon.CATEGORY,
+            "elytra-gps",
+            "Автопилот на элитрах по координатам."
+        );
     }
 
-    // =====================================================================
-    //  Публичное API для команд
-    // =====================================================================
+    // Starting a route
 
-    /** Лететь к одной точке. */
     public void startSingle(Point point) {
         route.clear();
         route.add(point);
         begin();
     }
 
-    /** Лететь по всем точкам из файла. */
     public boolean startFromFile() {
         PointFile.Result result = PointFile.load(fileName.get());
 
         if (result.created()) {
-            warning("Файл не найден — создал пример: %s. Впиши туда точки и повтори .gps", result.path());
+            warning("Создан пример файла: %s. Заполни его координатами.", result.path());
             return false;
         }
+
         for (String err : result.errors()) warning(err);
 
         if (result.points().isEmpty()) {
-            error("В %s нет ни одной корректной точки.", result.path());
+            error("Нет непосещённых точек в файле: %s", result.path());
             return false;
         }
 
         route.clear();
         route.addAll(result.points());
-        info("Загружено точек: %d (%s)", route.size(), result.path());
+
         begin();
-        return true;
+        return navigating;
     }
 
-    /** Перейти к следующей точке (команда .nextpoint и бинд). */
+    /**
+     * Сортирует маршрут по принципу ближайшего соседа:
+     * сначала ближайшая точка от игрока, затем ближайшая к предыдущей.
+     */
+    private void orderRouteByNearest() {
+        if (mc.player == null || route.size() < 2) return;
+
+        List<Point> remaining = new ArrayList<>(route);
+        List<Point> ordered = new ArrayList<>();
+
+        double px = mc.player.getX();
+        double pz = mc.player.getZ();
+
+        while (!remaining.isEmpty()) {
+            int nearest = 0;
+            double best = Double.MAX_VALUE;
+
+            for (int i = 0; i < remaining.size(); i++) {
+                Point p = remaining.get(i);
+
+                double dx = p.x() - px;
+                double dz = p.z() - pz;
+                double distanceSquared = dx * dx + dz * dz;
+
+                if (distanceSquared < best) {
+                    best = distanceSquared;
+                    nearest = i;
+                }
+            }
+
+            Point selected = remaining.remove(nearest);
+            ordered.add(selected);
+
+            px = selected.x();
+            pz = selected.z();
+        }
+
+        route.clear();
+        route.addAll(ordered);
+    }
+
+    private void begin() {
+        if (mc.player == null) return;
+
+        if (route.isEmpty()) {
+            error("Маршрут пуст.");
+            return;
+        }
+
+        if (mc.player.getItemBySlot(EquipmentSlot.CHEST).getItem() != Items.ELYTRA) {
+            error("Надень элитры или запусти маршрут с элитрами в слоте нагрудника.");
+            route.clear();
+            navigating = false;
+            return;
+        }
+
+        if (startNearest.get()) orderRouteByNearest();
+
+        index = 0;
+        waiting = false;
+        navigating = true;
+        spawnCommandSent = false;
+
+        fireworkTimer = 0;
+        takeoffTimer = 0;
+        airTicks = 0;
+        jumpHeld = false;
+
+        cruiseY = cruiseAltitude.get() > 0
+            ? cruiseAltitude.get()
+            : mc.player.getY() + 40;
+
+        if (!isActive()) toggle();
+
+        say("Маршрут запущен. Точка %d/%d: %s",
+            index + 1, route.size(), route.get(index));
+    }
+
+    // NextPoint
+
     public void nextPoint() {
         if (mc.player == null) return;
 
-        if (!navigating) {
+        if (!navigating || route.isEmpty()) {
             warning("Маршрут не запущен. Используй .gps");
             return;
+        }
+
+        if (waiting) {
+            // При прибытии точка уже записана в pointdelete.txt.
+            if (index + 1 >= route.size()) {
+                say("Маршрут завершён.");
+                stopNavigation();
+                return;
+            }
+
+            index++;
+            waiting = false;
+
+            resetFlightTimers();
+
+            if (!isActive()) toggle();
+
+            say("Продолжаю полёт к точке %d/%d: %s",
+                index + 1, route.size(), route.get(index));
+            return;
+        }
+
+        // Если кнопку нажали до прибытия, пропускаем текущую точку.
+        Point skipped = route.get(index);
+
+        if (!PointFile.markDeleted(fileName.get(), skipped)) {
+            warning("Не удалось записать пропущенную точку в pointdelete.txt");
         }
 
         if (index + 1 < route.size()) {
             index++;
             waiting = false;
-            say("Следующая точка %d/%d: %s", index + 1, route.size(), route.get(index));
+
+            resetFlightTimers();
+
+            say("Точка пропущена. Следующая: %s", route.get(index));
         } else {
-            say("Это была последняя точка — маршрут завершён.");
+            say("Это была последняя точка. Маршрут завершён.");
             stopNavigation();
         }
     }
 
+    private void resetFlightTimers() {
+        releaseJump();
+        takeoffTimer = 0;
+        airTicks = 0;
+        fireworkTimer = 0;
+    }
+
     public void stopNavigation() {
+        releaseJump();
+
         navigating = false;
         waiting = false;
         route.clear();
         index = 0;
+
         if (isActive()) toggle();
     }
 
     public String status() {
-        if (!navigating || route.isEmpty() || mc.player == null) return "Маршрут не запущен.";
+        if (!navigating || route.isEmpty() || mc.player == null) {
+            return "Маршрут не запущен.";
+        }
+
         Point p = route.get(index);
-        return String.format("Точка %d/%d: %s | до неё %.0f блоков%s",
-            index + 1, route.size(), p, distanceTo(p), waiting ? " | ждём .nextpoint" : "");
+
+        return String.format(
+            "Точка %d/%d: %s | до неё %.0f блоков%s",
+            index + 1,
+            route.size(),
+            p,
+            distanceTo(p),
+            waiting ? " | ожидание NextPoint" : ""
+        );
     }
 
     public boolean isNavigating() {
         return navigating;
     }
 
-    // =====================================================================
-    //  Жизненный цикл
-    // =====================================================================
+    private void say(String message, Object... args) {
+        if (chatFeedback.get()) info(message, args);
+    }
 
-    private void begin() {
-        if (mc.player == null) return;
+    // Elytra safety
 
-        if (mc.player.getItemBySlot(EquipmentSlot.CHEST).getItem() != Items.ELYTRA) {
-            error("На тебе нет элитр (слот нагрудника).");
-            route.clear();
-            return;
-        }
+    /**
+     * Возвращает true, если можно продолжать обычный цикл полёта.
+     * При замене элитры текущий тик пропускается.
+     */
+    private boolean handleElytraSafety() {
+        if (mc.player == null) return false;
 
-        index = 0;
-        if (startNearest.get() && route.size() > 1) {
-            double best = Double.MAX_VALUE;
-            for (int i = 0; i < route.size(); i++) {
-                double d = horizontalDistanceTo(route.get(i));
-                if (d < best) {
-                    best = d;
-                    index = i;
-                }
+        ItemStack chest = mc.player.getItemBySlot(EquipmentSlot.CHEST);
+
+        boolean equippedElytra = chest.is(Items.ELYTRA);
+
+        boolean lowDurability = equippedElytra
+            && chest.getMaxDamage() - chest.getDamageValue()
+                <= elytraDurabilityLeft.get();
+
+        if (equippedElytra && !lowDurability) return true;
+
+        if (autoReplaceElytra.get()) {
+            FindItemResult spare = InvUtils.find(
+                stack -> stack.is(Items.ELYTRA)
+                    && stack.getMaxDamage() - stack.getDamageValue()
+                        > elytraDurabilityLeft.get()
+            );
+
+            if (spare.found()) {
+                releaseJump();
+
+                // В Meteor слот нагрудника имеет номер 2.
+                // Перемещение меняет предметы местами, поэтому старая элитра
+                // остаётся в инвентаре, если там есть место для обмена.
+                InvUtils.move().from(spare.slot()).toArmor(2);
+
+                takeoffTimer = 0;
+                airTicks = 0;
+
+                say("Обнаружена изношенная или отсутствующая элитра. Меняю на запасную.");
+                return false;
             }
         }
-        waiting = false;
-        navigating = true;
-        fireworkTimer = 0;
-        takeoffTimer = 0;
-        airTicks = 0;
-        jumpHeld = false;
-        cruiseY = cruiseAltitude.get() > 0 ? cruiseAltitude.get() : mc.player.getY() + 40;
 
-        if (!isActive()) toggle();
+        if (spawnIfNoElytra.get() && !spawnCommandSent) {
+            String command = spawnCommand.get().trim();
 
-        say("Старт. Точка %d/%d: %s", index + 1, route.size(), route.get(index));
+            if (!command.isEmpty()) {
+                spawnCommandSent = true;
+
+                stopNavigation();
+
+                if (mc.player != null && mc.player.connection != null) {
+                    mc.player.connection.sendCommand(
+                        command.startsWith("/")
+                            ? command.substring(1)
+                            : command
+                    );
+
+                    warning("Запасной элитры нет. Отправлена команда возвращения.");
+                }
+
+                return false;
+            }
+        }
+
+        error("Нет пригодной элитры или запасной элитры. Останавливаю автопилот.");
+        stopNavigation();
+        return false;
     }
+
+    // Lifecycle
 
     @Override
     public void onDeactivate() {
@@ -334,182 +554,220 @@ public class ElytraGps extends Module {
 
     @EventHandler
     private void onGameLeft(GameLeftEvent event) {
+        releaseJump();
+
         navigating = false;
         waiting = false;
         route.clear();
         index = 0;
+
         if (isActive()) toggle();
     }
 
-    // =====================================================================
-    //  Основной цикл
-    // =====================================================================
+    // Main flight loop
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (!navigating || mc.player == null || mc.level == null || route.isEmpty()) return;
-
-        if (mc.player.getItemBySlot(EquipmentSlot.CHEST).getItem() != Items.ELYTRA) {
-            error("Элитры пропали — останавливаюсь.");
-            stopNavigation();
+        if (!navigating || mc.player == null || mc.level == null || route.isEmpty()) {
             return;
         }
 
-        // --- взлёт ---
+        if (!handleElytraSafety()) return;
+
+        // В ожидании NextPoint не управляем полётом и не пытаемся взлететь.
+        if (waiting) return;
+
         if (!mc.player.isFallFlying()) {
             handleTakeoff();
             return;
         }
+
         takeoffTimer = 0;
         releaseJump();
 
         Point target = route.get(index);
 
-        // --- прибытие ---
-        if (!waiting && distanceTo(target) <= arriveRadius.get()) {
+        if (distanceTo(target) <= arriveRadius.get()) {
             onArrive();
-            if (!navigating) return;
+
+            if (!navigating || waiting) return;
+
             target = route.get(index);
         }
 
-        // --- куда смотреть ---
         double yaw = desiredYaw(target);
-        double pitch = desiredPitch(target, yaw);
+        double pitch = desiredPitch(target);
 
-        if (avoidObstacles.get()) pitch = avoidTerrain(yaw, pitch);
+        if (avoidObstacles.get()) {
+            pitch = avoidTerrain(yaw, pitch);
+        }
 
         applyRotation(yaw, pitch);
 
-        // --- фейерверки ---
         if (useFireworks.get()) handleFireworks();
     }
 
-    
-private void onArrive() {
-    Point reached = route.get(index);
+    private void onArrive() {
+        Point reached = route.get(index);
 
-    // Сохраняем достигнутую точку, чтобы не возвращаться к ней.
-    if (!PointFile.markDeleted(fileName.get(), reached)) {
-        warning("Не удалось сохранить достигнутую точку.");
+        if (!PointFile.markDeleted(fileName.get(), reached)) {
+            warning("Не удалось записать точку в pointdelete.txt");
+        }
+
+        if (index + 1 >= route.size()) {
+            say("Последняя точка достигнута. Маршрут завершён.");
+            stopNavigation();
+            return;
+        }
+
+        if (autoAdvance.get()) {
+            index++;
+            waiting = false;
+
+            resetFlightTimers();
+
+            say("Точка достигнута. Следующая точка: %s", route.get(index));
+        } else {
+            waiting = true;
+
+            say("Точка %d/%d достигнута. Нажми NextPoint для продолжения.",
+                index + 1, route.size());
+        }
     }
 
-    waiting = true;
-    releaseJump();
-
-    say("Точка %d/%d достигнута: %s. Ожидаю NextPoint.",
-        index + 1, route.size(), reached);
-
-    // Останавливаем управление полётом, но сохраняем маршрут
-    // и состояние ожидания для команды NextPoint.
-    navigating = false;
-    if (isActive()) toggle();
-}
+    // Navigation math
 
     private double horizontalDistanceTo(Point p) {
         double dx = p.x() - mc.player.getX();
         double dz = p.z() - mc.player.getZ();
+
         return Math.sqrt(dx * dx + dz * dz);
     }
 
     private double distanceTo(Point p) {
-        double h = horizontalDistanceTo(p);
-        if (!p.hasY()) return h;
+        double horizontal = horizontalDistanceTo(p);
+
+        if (!p.hasY()) return horizontal;
+
         double dy = p.y() - mc.player.getY();
-        return Math.sqrt(h * h + dy * dy);
+
+        return Math.sqrt(horizontal * horizontal + dy * dy);
     }
 
-    /** Азимут на точку. В Minecraft yaw 0 = +Z, 90 = -X. */
     private double bearingTo(Point p) {
         double dx = p.x() - mc.player.getX();
         double dz = p.z() - mc.player.getZ();
+
         return Math.toDegrees(Math.atan2(dz, dx)) - 90.0;
     }
 
     private double desiredYaw(Point target) {
-        double bearing = bearingTo(target);
-        if (!waiting) return bearing;
-
-        // Круг ожидания: у радиуса orbit — летим по касательной (+90°), дальше — к точке, ближе — от неё.
-        double r = orbitRadius.get();
-        double offset = Mth.clamp((horizontalDistanceTo(target) - r) / r, -1.0, 1.0);
-        return bearing + 90.0 * (1.0 - offset);
+        return bearingTo(target);
     }
 
-    private double desiredPitch(Point target, double yaw) {
+    private double desiredPitch(Point target) {
         double wantY = cruiseY;
 
-        if (target.hasY() && !waiting) {
-            // Идём на крейсерской высоте и снижаемся/набираем к Y точки только на подлёте.
-            double horiz = horizontalDistanceTo(target);
-            double approachDist = Math.max(80.0, Math.abs(cruiseY - target.y()) * 6.0);
-            if (horiz < approachDist) wantY = target.y();
+        if (target.hasY()) {
+            double horizontal = horizontalDistanceTo(target);
+            double approachDistance = Math.max(
+                80.0,
+                Math.abs(cruiseY - target.y()) * 6.0
+            );
+
+            if (horizontal < approachDistance) {
+                wantY = target.y();
+            }
         }
 
-        double err = wantY - mc.player.getY();         // >0 — надо выше
-        double pitch = -err * 0.5;                      // отрицательный pitch = вверх
-        return Mth.clamp(pitch, -maxPitchUp.get(), maxPitchDown.get());
+        double errorY = wantY - mc.player.getY();
+        double pitch = -errorY * 0.5;
+
+        return Mth.clamp(
+            pitch,
+            -maxPitchUp.get(),
+            maxPitchDown.get()
+        );
     }
 
-    /** Если по курсу блоки — поднимаем нос. */
     private double avoidTerrain(double yaw, double pitch) {
         Vec3 eye = mc.player.getEyePosition();
-        double dist = lookahead.get();
+        double distance = lookahead.get();
 
         double yawRad = Math.toRadians(yaw);
         double pitchRad = Math.toRadians(pitch);
 
-        // Проверяем и по запланированному направлению, и горизонтально вперёд.
         Vec3 planned = new Vec3(
             -Math.sin(yawRad) * Math.cos(pitchRad),
             -Math.sin(pitchRad),
             Math.cos(yawRad) * Math.cos(pitchRad)
         );
-        Vec3 flat = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
 
-        if (blocked(eye, planned, dist) || blocked(eye, flat, dist)) {
+        Vec3 flat = new Vec3(
+            -Math.sin(yawRad),
+            0,
+            Math.cos(yawRad)
+        );
+
+        if (blocked(eye, planned, distance) || blocked(eye, flat, distance)) {
             return -maxPitchUp.get();
         }
+
         return pitch;
     }
 
-    private boolean blocked(Vec3 from, Vec3 dir, double dist) {
-        Vec3 to = from.add(dir.scale(dist));
-        ClipContext ctx = new ClipContext(from, to, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mc.player);
-        return mc.level.clip(ctx).getType() != HitResult.Type.MISS;
+    private boolean blocked(Vec3 from, Vec3 direction, double distance) {
+        Vec3 to = from.add(direction.scale(distance));
+
+        ClipContext context = new ClipContext(
+            from,
+            to,
+            ClipContext.Block.COLLIDER,
+            ClipContext.Fluid.NONE,
+            mc.player
+        );
+
+        return mc.level.clip(context).getType() != HitResult.Type.MISS;
     }
 
     private void applyRotation(double yaw, double pitch) {
-        float curYaw = mc.player.getYRot();
-        float curPitch = mc.player.getXRot();
+        float currentYaw = mc.player.getYRot();
+        float currentPitch = mc.player.getXRot();
 
         float maxStep = turnSpeed.get().floatValue();
 
-        float dYaw = Mth.clamp(Mth.wrapDegrees((float) yaw - curYaw), -maxStep, maxStep);
-        float dPitch = Mth.clamp((float) pitch - curPitch, -maxStep, maxStep);
+        float deltaYaw = Mth.clamp(
+            Mth.wrapDegrees((float) yaw - currentYaw),
+            -maxStep,
+            maxStep
+        );
 
-        mc.player.setYRot(curYaw + dYaw);
-        mc.player.setXRot(Mth.clamp(curPitch + dPitch, -90f, 90f));
+        float deltaPitch = Mth.clamp(
+            (float) pitch - currentPitch,
+            -maxStep,
+            maxStep
+        );
+
+        mc.player.setYRot(currentYaw + deltaYaw);
+        mc.player.setXRot(
+            Mth.clamp(currentPitch + deltaPitch, -90f, 90f)
+        );
     }
 
-    // =====================================================================
-    //  Взлёт и фейерверки
-    // =====================================================================
+    // Takeoff
 
     private void handleTakeoff() {
         if (!autoTakeoff.get()) return;
 
         takeoffTimer++;
 
-        // Не получилось за ~10 секунд — сдаёмся, чтобы не прыгать вечно.
         if (takeoffTimer > 200) {
             releaseJump();
-            error("Не удалось взлететь. Останавливаюсь.");
+            error("Не удалось взлететь. Останавливаю маршрут.");
             stopNavigation();
             return;
         }
 
-        // Двойной пробел: нажали -> отпустили -> (в воздухе) нажали ещё раз.
-        // Если пробел держали в прошлом тике — отпускаем, чтобы следующее нажатие считалось новым.
         if (jumpHeld) {
             releaseJump();
             return;
@@ -517,11 +775,12 @@ private void onArrive() {
 
         if (mc.player.onGround()) {
             airTicks = 0;
-            pressJump();                       // первый пробел — прыжок
+            pressJump();
         } else {
             airTicks++;
+
             if (airTicks >= 3 && (airTicks - 3) % 5 == 0) {
-                pressJump();                   // второй пробел в воздухе — раскрывает элитры
+                pressJump();
             }
         }
     }
@@ -532,9 +791,14 @@ private void onArrive() {
     }
 
     private void releaseJump() {
-        if (jumpHeld && mc.options != null) mc.options.keyJump.setDown(false);
+        if (jumpHeld && mc.options != null) {
+            mc.options.keyJump.setDown(false);
+        }
+
         jumpHeld = false;
     }
+
+    // Fireworks
 
     private void handleFireworks() {
         if (fireworkTimer > 0) {
@@ -542,20 +806,32 @@ private void onArrive() {
             return;
         }
 
-        double speed = mc.player.getDeltaMovement().length() * 20.0; // блоков/сек
+        double speed = mc.player.getDeltaMovement().length() * 20.0;
+
         if (speed >= minSpeed.get()) return;
 
         FindItemResult rocket = InvUtils.findInHotbar(Items.FIREWORK_ROCKET);
+
         if (!rocket.found()) return;
 
         if (rocket.isOffhand()) {
             mc.gameMode.useItem(mc.player, InteractionHand.OFF_HAND);
-            mc.player.swing(InteractionHand.OFF_HAND, mc.player.getOffhandItem().getInteractAnimation(), false);
+
+            mc.player.swing(
+                InteractionHand.OFF_HAND,
+                mc.player.getOffhandItem().getInteractAnimation(),
+                false
+            );
         } else {
             InvUtils.swap(rocket.slot(), true);
 
             mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
-            mc.player.swing(InteractionHand.MAIN_HAND, mc.player.getMainHandItem().getInteractAnimation(), false);
+
+            mc.player.swing(
+                InteractionHand.MAIN_HAND,
+                mc.player.getMainHandItem().getInteractAnimation(),
+                false
+            );
 
             InvUtils.swapBack();
         }
@@ -563,9 +839,7 @@ private void onArrive() {
         fireworkTimer = fireworkCooldown.get();
     }
 
-    // =====================================================================
-    //  Рендер
-    // =====================================================================
+    // Render
 
     private static final Color CURRENT = new Color(40, 160, 255, 255);
     private static final Color CURRENT_SIDE = new Color(40, 160, 255, 40);
@@ -573,28 +847,43 @@ private void onArrive() {
 
     @EventHandler
     private void onRender3d(Render3DEvent event) {
-        if (!render.get() || !navigating || route.isEmpty() || mc.player == null) return;
+        if (!render.get() || !navigating || route.isEmpty() || mc.player == null) {
+            return;
+        }
 
         for (int i = index; i < route.size(); i++) {
             Point p = route.get(i);
             double y = p.hasY() ? p.y() : mc.player.getY();
 
             if (i == index) {
-                event.renderer.line(RenderUtils.center.x, RenderUtils.center.y, RenderUtils.center.z, p.x(), y, p.z(), CURRENT);
-                event.renderer.box(p.x() - 1, y - 1, p.z() - 1, p.x() + 1, y + 1, p.z() + 1, CURRENT_SIDE, CURRENT, ShapeMode.Both, 0);
+                event.renderer.line(
+                    RenderUtils.center.x,
+                    RenderUtils.center.y,
+                    RenderUtils.center.z,
+                    p.x(), y, p.z(),
+                    CURRENT
+                );
+
+                event.renderer.box(
+                    p.x() - 1, y - 1, p.z() - 1,
+                    p.x() + 1, y + 1, p.z() + 1,
+                    CURRENT_SIDE,
+                    CURRENT,
+                    ShapeMode.Both,
+                    0
+                );
             } else {
-                Point prev = route.get(i - 1);
-                double prevY = prev.hasY() ? prev.y() : mc.player.getY();
-                event.renderer.line(prev.x(), prevY, prev.z(), p.x(), y, p.z(), OTHER);
+                Point previous = route.get(i - 1);
+                double previousY = previous.hasY()
+                    ? previous.y()
+                    : mc.player.getY();
+
+                event.renderer.line(
+                    previous.x(), previousY, previous.z(),
+                    p.x(), y, p.z(),
+                    OTHER
+                );
             }
         }
-    }
-
-    // =====================================================================
-    //  Чат
-    // =====================================================================
-
-    private void say(String message, Object... args) {
-        if (chatFeedback.get()) info(message, args);
     }
 }
