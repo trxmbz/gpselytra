@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "elytra-gps",
+  "version": "${version}",
+  "name": "Elytra GPS",
+  "description": "Meteor addon: fly on elytra to coordinates (.gps) or through a list of points from pointelytra.txt, skip with .nextpoint or a keybind.",
+  "authors": [
+    "you"
+  ],
+  "icon": "assets/template/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "meteor": [
+      "com.elytragps.ElytraGpsAddon"
+    ]
+  },
+  "custom": {
+    "meteor-client:color": "40,160,255",
+    "modmenu": {
+      "parent": {
+        "id": "meteor-client"
+      }
+    }
+  },
+  "depends": {
+    "java": ">=${jdk_version}",
+    "minecraft": "${minecraft_version}",
+    "meteor-client": "*"
+  }
+}
