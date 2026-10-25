@@ -26,10 +26,13 @@ import meteordevelopment.meteorclient.utils.render.RenderUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.state.BlockState;
@@ -123,6 +126,28 @@ public class ElytraGps extends Module {
         .name("auto-takeoff")
         .description("Сам прыгать и раскрывать элитры двойным пробелом, если ты на земле.")
         .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> autoReplaceElytra = sgGeneral.add(new BoolSetting.Builder()
+        .name("auto-replace-elytra")
+        .description("Если надетые элитры сломаны (или не надеты) — взять целые из инвентаря.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> spawnIfNoElytra = sgGeneral.add(new BoolSetting.Builder()
+        .name("spawn-if-no-elytra")
+        .description("Если целых элитр не нашлось — остановить маршрут и отправить команду спавна.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<String> spawnCommand = sgGeneral.add(new StringSetting.Builder()
+        .name("spawn-command")
+        .description("Команда, которая отправляется, если элитр нет (со слэшем или без).")
+        .defaultValue("spawn")
+        .visible(spawnIfNoElytra::get)
         .build()
     );
 
@@ -276,6 +301,7 @@ public class ElytraGps extends Module {
 
     private int walkTimer = 0;
     private boolean walking = false;
+    private int swapCooldown = 0;
 
     private boolean ownsElytraFly = false;
     private ElytraFlightModes savedMode = null;
@@ -392,8 +418,8 @@ public class ElytraGps extends Module {
     private void begin() {
         if (mc.player == null) return;
 
-        if (mc.player.getItemBySlot(EquipmentSlot.CHEST).getItem() != Items.ELYTRA) {
-            error("На тебе нет элитр (слот нагрудника).");
+        swapCooldown = 0;
+        if (!ensureElytra()) {
             route.clear();
             return;
         }
@@ -510,11 +536,9 @@ public class ElytraGps extends Module {
     private void onTick(TickEvent.Pre event) {
         if (!navigating || mc.player == null || mc.level == null || route.isEmpty()) return;
 
-        if (mc.player.getItemBySlot(EquipmentSlot.CHEST).getItem() != Items.ELYTRA) {
-            error("Элитры пропали — останавливаюсь.");
-            stopNavigation();
-            return;
-        }
+        // Проверяем элитры (сломались в полёте — меняем на целые; целых нет — спавн).
+        if (swapCooldown > 0) swapCooldown--;
+        else if (!ensureElytra()) return;
 
         switch (phase) {
             case CLIMB -> tickClimb();
@@ -524,6 +548,69 @@ public class ElytraGps extends Module {
             case HOLD -> {
             }
         }
+    }
+
+    // -------------------------------------------------------------- ELYTRA
+
+    private static boolean isBroken(ItemStack stack) {
+        return stack.getMaxDamage() - stack.getDamageValue() <= 1;
+    }
+
+    /**
+     * Проверяет надетые элитры. Сломаны/не надеты — пробует взять целые из инвентаря.
+     * Если целых нет — останавливает маршрут и (опционально) отправляет команду спавна.
+     *
+     * @return true, если можно продолжать; false, если маршрут остановлен.
+     */
+    private boolean ensureElytra() {
+        ItemStack chest = mc.player.getItemBySlot(EquipmentSlot.CHEST);
+        if (chest.has(DataComponents.GLIDER) && !isBroken(chest)) return true;
+
+        if (autoReplaceElytra.get() && equipGoodElytra()) {
+            swapCooldown = 10; // ждём, пока сервер обновит слот
+            say("Поменял элитры на целые.");
+            return true;
+        }
+
+        error("Нет целых элитр.");
+        stopNavigation();
+
+        if (spawnIfNoElytra.get() && mc.getConnection() != null) {
+            String command = spawnCommand.get().trim();
+            if (command.startsWith("/")) command = command.substring(1);
+            if (!command.isEmpty()) {
+                info("Отправляю /%s.", command);
+                mc.getConnection().sendCommand(command);
+            }
+        }
+        return false;
+    }
+
+    /** Берёт из инвентаря самые прочные целые элитры и надевает их. */
+    private boolean equipGoodElytra() {
+        List<ItemStack> items = mc.player.getInventory().getNonEquipmentItems();
+
+        int best = -1;
+        int bestLeft = -1;
+
+        for (int i = 0; i < items.size(); i++) {
+            ItemStack stack = items.get(i);
+            if (!stack.has(DataComponents.GLIDER) || isBroken(stack)) continue;
+
+            int left = stack.getMaxDamage() - stack.getDamageValue();
+            if (left > bestLeft) {
+                bestLeft = left;
+                best = i;
+            }
+        }
+
+        if (best == -1) return false;
+
+        InvUtils.move().from(best).toArmor(2);
+        if (mc.getConnection() != null) {
+            mc.getConnection().send(new ServerboundContainerClosePacket(0));
+        }
+        return true;
     }
 
     // ---------------------------------------------------------------- CLIMB
