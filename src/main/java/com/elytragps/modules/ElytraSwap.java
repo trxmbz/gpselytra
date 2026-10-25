@@ -23,6 +23,12 @@ import net.minecraft.world.item.Items;
 
 import java.util.List;
 
+/**
+ * По бинду меняет элитры на нагрудник из инвентаря (и обратно).
+ * Опционально: когда элитры раскрылись — сразу запускает фейерверк (start on firework).
+ * <p>
+ * Модуль должен быть включён (бинд срабатывает только пока он активен).
+ */
 public class ElytraSwap extends Module {
     private static final List<Item> CHESTPLATES = List.of(
         Items.NETHERITE_CHESTPLATE,
@@ -35,6 +41,8 @@ public class ElytraSwap extends Module {
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgFirework = settings.createGroup("Start on firework");
+
+    // ---- General ----
 
     @SuppressWarnings("unused")
     private final Setting<Keybind> swapKey = sgGeneral.add(new KeybindSetting.Builder()
@@ -51,6 +59,8 @@ public class ElytraSwap extends Module {
         .defaultValue(true)
         .build()
     );
+
+    // ---- Start on firework ----
 
     private final Setting<Boolean> startOnFirework = sgFirework.add(new BoolSetting.Builder()
         .name("start-on-firework")
@@ -93,6 +103,10 @@ public class ElytraSwap extends Module {
         pendingDelay = -1;
     }
 
+    // =====================================================================
+    //  Обмен элитры <-> нагрудник
+    // =====================================================================
+
     public void swap() {
         if (mc.player == null || mc.gameMode == null) return;
 
@@ -130,7 +144,7 @@ public class ElytraSwap extends Module {
             if (!stack.has(DataComponents.GLIDER)) continue;
 
             int left = stack.getMaxDamage() - stack.getDamageValue();
-            if (left <= 1) continue;
+            if (left <= 1) continue; // почти сломанные не берём
 
             if (left > bestLeft) {
                 bestLeft = left;
@@ -151,6 +165,10 @@ public class ElytraSwap extends Module {
         }
     }
 
+    // =====================================================================
+    //  Start on firework
+    // =====================================================================
+
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.level == null) return;
@@ -159,6 +177,7 @@ public class ElytraSwap extends Module {
 
         boolean flying = mc.player.isFallFlying();
 
+        // Момент раскрытия элитр.
         if (startOnFirework.get() && flying && !wasFlying && cooldownTicks == 0) {
             pendingDelay = delay.get();
         }
@@ -166,7 +185,7 @@ public class ElytraSwap extends Module {
 
         if (pendingDelay < 0) return;
 
-        if (!flying) {
+        if (!flying) {           // успели закрыться — отменяем
             pendingDelay = -1;
             return;
         }
@@ -178,6 +197,7 @@ public class ElytraSwap extends Module {
 
         pendingDelay = -1;
 
+        // Не мешаем маршруту .gps — он сам управляет фейерверками.
         if (Modules.get().get(ElytraGps.class).isNavigating()) return;
 
         if (launchFirework()) cooldownTicks = cooldown.get();
