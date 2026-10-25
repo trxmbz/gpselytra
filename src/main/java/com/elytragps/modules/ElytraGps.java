@@ -110,8 +110,8 @@ public class ElytraGps extends Module {
 
     private final Setting<Boolean> autoAdvance = sgGeneral.add(new BoolSetting.Builder()
         .name("auto-advance")
-        .description("Сам лететь к следующей точке, когда достиг текущей. Если выключено — ждёт .nextpoint / бинд (в воздухе кружит, на земле стоит).")
-        .defaultValue(true)
+        .description("Сам лететь к следующей точке, когда достиг текущей. Если выключено — садится на точке и ждёт .nextpoint / бинд.")
+        .defaultValue(false)
         .build()
     );
 
@@ -247,7 +247,7 @@ public class ElytraGps extends Module {
     private final Setting<LandMode> landMode = sgLanding.add(new EnumSetting.Builder<LandMode>()
         .name("land-mode")
         .description("Где садиться: только на последней точке, на каждой или нигде (просто пролетать).")
-        .defaultValue(LandMode.LastPoint)
+        .defaultValue(LandMode.EveryPoint)
         .build()
     );
 
